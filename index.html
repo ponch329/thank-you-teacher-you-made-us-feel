@@ -6,16 +6,21 @@
 <title>Thank-You Pages</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>html,body{margin:0;padding:0;background:#f4eee2;} #root{min-height:100vh;}</style>
 </head>
 <body>
 <div id="root"></div>
 <script>
 const { useState, useEffect, useRef } = React;
+const SUPABASE_URL = "https://rmrhakkougcmxqlfjlww.supabase.co/rest/v1/";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJtcmhha2tvdWdjbXhxbGZqbHd3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODExMjU2OTgsImV4cCI6MjA5NjcwMTY5OH0.J_ZeRiA0QglfJBUz62Tds82QUcFufWlLvs07acntvoE";
 (function() {
   var mem = {};
-  function scope(shared) {
-    return shared ? "s:" : "p:";
+  var NS = "";
+  try {
+    NS = window.location && window.location.pathname || "/";
+  } catch (e) {
   }
   function lsGet(k) {
     try {
@@ -38,34 +43,54 @@ const { useState, useEffect, useRef } = React;
       delete mem[k];
     }
   }
-  function lsAllKeys() {
-    try {
-      var a = [];
-      for (var i = 0; i < localStorage.length; i++) a.push(localStorage.key(i));
-      return a;
-    } catch (e) {
-      return Object.keys(mem);
+  var sb = null;
+  try {
+    if (window.supabase && SUPABASE_URL.indexOf("http") === 0) {
+      sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
     }
+  } catch (e) {
   }
+  window.__backendReady = !!sb;
   window.storage = {
     get: function(key, shared) {
-      var v = lsGet(scope(shared) + key);
-      return Promise.resolve(v == null ? null : { value: v });
+      if (!shared) {
+        var v = lsGet("p|" + key);
+        return Promise.resolve(v == null ? null : { value: v });
+      }
+      if (!sb) return Promise.resolve(null);
+      return sb.from("kv").select("v").eq("ns", NS).eq("k", key).maybeSingle().then(function(r) {
+        return r && r.data && r.data.v != null ? { value: r.data.v } : null;
+      });
     },
     set: function(key, value, shared) {
-      lsSet(scope(shared) + key, value);
-      return Promise.resolve({ value });
+      if (!shared) {
+        lsSet("p|" + key, value);
+        return Promise.resolve({ value });
+      }
+      if (!sb) return Promise.reject(new Error("Backend not configured"));
+      return sb.from("kv").upsert({ ns: NS, k: key, v: value }, { onConflict: "ns,k" }).then(function(r) {
+        if (r && r.error) throw r.error;
+        return { value };
+      });
     },
     delete: function(key, shared) {
-      lsDel(scope(shared) + key);
-      return Promise.resolve({ deleted: true });
+      if (!shared) {
+        lsDel("p|" + key);
+        return Promise.resolve({ deleted: true });
+      }
+      if (!sb) return Promise.resolve({ deleted: true });
+      return sb.from("kv").delete().eq("ns", NS).eq("k", key).then(function() {
+        return { deleted: true };
+      });
     },
     list: function(prefix, shared) {
-      var s = scope(shared), want = s + (prefix || ""), out = [];
-      lsAllKeys().forEach(function(k) {
-        if (k && k.indexOf(want) === 0) out.push(k.slice(s.length));
+      if (!shared) return Promise.resolve({ keys: [] });
+      if (!sb) return Promise.resolve({ keys: [] });
+      return sb.from("kv").select("k").eq("ns", NS).like("k", (prefix || "") + "%").then(function(r) {
+        return { keys: r && r.data ? r.data.map(function(x) {
+          return x.k;
+        }) : [] };
       });
-      return Promise.resolve({ keys: out });
     }
   };
 })();
@@ -187,10 +212,11 @@ function App() {
   const [showPin, setShowPin] = useState(false);
   const [config, setConfig] = useState(DEFAULT_CONFIG);
   const [needsSetup, setNeedsSetup] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const teachers = config && config.teachers || DEFAULT_CONFIG.teachers;
   const currentTeacher = teachers.find((t) => t.key === activeTeacher) || teachers[0];
-  async function loadEntries() {
-    setLoading(true);
+  async function loadEntries(silent) {
+    if (!silent) setLoading(true);
     try {
       const res = await window.storage.list("child:", true);
       const keys = res && res.keys || [];
@@ -207,10 +233,15 @@ function App() {
       items.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
       setEntries(items);
     } catch (e) {
-      setEntries([]);
+      if (!silent) setEntries([]);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
+  }
+  async function refresh() {
+    setRefreshing(true);
+    await loadEntries(true);
+    setRefreshing(false);
   }
   useEffect(() => {
     loadEntries();
@@ -433,7 +464,7 @@ function App() {
       onClick: () => setActiveTeacher(t.key)
     },
     t.name
-  ))), /* @__PURE__ */ React.createElement("div", { className: "bar-actions" }, isAdmin && /* @__PURE__ */ React.createElement("button", { className: "btn btn-ghost", onClick: () => setShowTextPanel((s) => !s) }, "Text style"), /* @__PURE__ */ React.createElement("button", { className: "btn btn-primary", onClick: () => setPrintMode(true) }, "Print this page"))), isAdmin && showTextPanel && /* @__PURE__ */ React.createElement(TextStylePanel, { pageStyle, onChange: savePageStyle, onReset: () => savePageStyle(DEFAULT_STYLE) }), loading ? /* @__PURE__ */ React.createElement("div", { className: "loading" }, "Loading the children\u2026") : /* @__PURE__ */ React.createElement(React.Fragment, null, entries.length > 0 && /* @__PURE__ */ React.createElement("p", { className: "page-hint no-print" }, "Tap a child's photo to reposition or zoom it."), /* @__PURE__ */ React.createElement("div", { id: "printArea" }, /* @__PURE__ */ React.createElement(
+  ))), /* @__PURE__ */ React.createElement("div", { className: "bar-actions" }, /* @__PURE__ */ React.createElement("button", { className: "btn btn-ghost", onClick: refresh, disabled: refreshing }, refreshing ? "Refreshing\u2026" : "\u21BB Refresh"), isAdmin && /* @__PURE__ */ React.createElement("button", { className: "btn btn-ghost", onClick: () => setShowTextPanel((s) => !s) }, "Text style"), /* @__PURE__ */ React.createElement("button", { className: "btn btn-primary", onClick: () => setPrintMode(true) }, "Print this page"))), isAdmin && showTextPanel && /* @__PURE__ */ React.createElement(TextStylePanel, { pageStyle, onChange: savePageStyle, onReset: () => savePageStyle(DEFAULT_STYLE) }), loading ? /* @__PURE__ */ React.createElement("div", { className: "loading" }, "Loading the children\u2026") : /* @__PURE__ */ React.createElement(React.Fragment, null, entries.length > 0 && /* @__PURE__ */ React.createElement("p", { className: "page-hint no-print" }, "Tap a child's photo to reposition or zoom it."), /* @__PURE__ */ React.createElement("div", { id: "printArea" }, /* @__PURE__ */ React.createElement(
     ThankYouPage,
     {
       teacher: currentTeacher,
